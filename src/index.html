@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mon Assistant IA Local</title>
+    <!-- Tailwind CSS (généré localement, voir AGENTS.md) -->
+    <link href="/ui-static/tailwind.css" rel="stylesheet" />
+    <!-- Prism.js 1.29.0 (hébergé localement) -->
+    <link href="/ui-static/prism/prism-tomorrow.min.css" rel="stylesheet" />
+    <link href="/ui-static/prism/prism-line-numbers.min.css" rel="stylesheet" />
+    <link href="/ui-static/prism/prism-toolbar.min.css" rel="stylesheet" />
+    <style>
+        pre { margin: 1.5em 0; border-radius: 0.5rem; }
+        .chat-container { height: calc(100vh - 180px); }
+        .sidebar { width: 300px; }
+        @media (max-width: 768px) {
+            .sidebar { display: none; }
+        }
+        .user-message {
+            margin-left: auto;
+            max-width: 90%;
+            width: fit-content;
+            background-color: #2563eb;
+            color: #fff;
+            padding: 0.5rem 1rem;
+            border-radius: 1rem 1rem 0.25rem 1rem;
+        }
+        .model-info {
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 0.75rem;
+            text-align: right;
+            margin-top: 0.5rem;
+            opacity: 0.8;
+        }
+        .ai-message {
+            width: 100%;
+        }
+        .streaming-content {
+            white-space: pre-wrap;
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-100 flex h-screen overflow-hidden">
+    <!-- Sidebar -->
+    <div class="sidebar bg-gray-800 border-r border-gray-700 flex flex-col">
+        <div class="p-4 border-b border-gray-700">
+            <button onclick="createNewChat()" class="w-full bg-blue-600 hover:bg-blue-700 py-2 px-4 rounded-lg font-bold transition">
+                + Nouvelle discussion
+            </button>
+        </div>
+        <div id="history-list" class="flex-1 overflow-y-auto p-2 space-y-2">
+            <!-- Les discussions s'afficheront ici -->
+        </div>
+    </div>
+
+    <!-- Main Content -->
+    <div class="flex-1 flex flex-col relative">
+        <header class="py-4 border-b border-gray-700 bg-gray-800 flex items-center justify-between px-4">
+            <h1 class="text-2xl font-bold text-blue-400">Ollama Chat</h1>
+            <select id="model-select" class="bg-gray-700 border border-gray-600 rounded-lg px-3 py-1 text-sm focus:outline-none focus:border-blue-500">
+                <option value="gemma4:12b_8k">gemma4:12b_8k</option>
+            </select>
+        </header>
+
+        <div id="chat-box" class="chat-container overflow-y-auto p-4 space-y-4">
+            <div class="text-gray-400 italic">Bienvenue ! Sélectionnez ou commencez une nouvelle discussion.</div>
+        </div>
+
+        <div class="p-4 border-t border-gray-700 bg-gray-800">
+            <div class="max-w-4xl mx-auto flex gap-2">
+                <input type="text" id="user-input" class="flex-1 bg-gray-700 border border-gray-600 rounded-lg px-4 py-2 focus:outline-none focus:border-blue-500" placeholder="Entrez votre message ici...">
+                <button onclick="sendMessage()" class="bg-blue-600 hover:bg-blue-700 px-6 py-2 rounded-lg font-bold">Envoyer</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/ui-static/prism/prism.min.js"></script>
+    <script src="/ui-static/prism/prism-autoloader.min.js"></script>
+    <script src="/ui-static/prism/prism-line-numbers.min.js"></script>
+    <script src="/ui-static/prism/prism-toolbar.min.js"></script>
+    <script src="/ui-static/prism/prism-copy-to-clipboard.min.js"></script>
+
+    <script>
+        Prism.plugins.autoloader.languages_path = '/ui-static/prism/components/';
+
+        let currentChatId = null;
+        let chats = JSON.parse(localStorage.getItem('ollama_chats') || '[]');
+
+        const chatBox = document.getElementById('chat-box');
+        const userInput = document.getElementById('user-input');
+        const historyList = document.getElementById('history-list');
+        const modelSelect = document.getElementById('model-select');
+        const DEFAULT_MODEL = 'gemma4:12b_8k';
+
+        async function loadModels() {
+            try {
+                const res = await fetch('/api/tags');
+                const data = await res.json();
+                const models = data.models || [];
+                if (models.length === 0) return;
+
+                modelSelect.innerHTML = '';
+                models.forEach(m => {
+                    const opt = document.createElement('option');
+                    opt.value = m.name;
+                    opt.textContent = m.name;
+                    modelSelect.appendChild(opt);
+                });
+
+                if (models.some(m => m.name === DEFAULT_MODEL)) {
+                    modelSelect.value = DEFAULT_MODEL;
+                }
+            } catch (e) {
+                // Si /api/tags échoue, on garde l'option par défaut déjà présente dans le HTML
+            }
+        }
+
+        // Initialisation
+        function init() {
+            renderHistory();
+            loadModels();
+            if (chats.length > 0) {
+                loadChat(chats[0].id);
+            }
+        }
+
+        function createNewChat() {
+            const id = Date.now().toString();
+            const newChat = {
+                id: id,
+                title: "Nouvelle discussion " + (chats.length + 1),
+                messages: []
+            };
+            chats.push(newChat);
+            saveToStorage();
+            loadChat(id);
+        }
+
+        function saveToStorage() {
+            localStorage.setItem('ollama_chats', JSON.stringify(chats));
+        }
+
+        function renderHistory() {
+            historyList.innerHTML = '';
+            chats.forEach(chat => {
+                // Construction via le DOM : le titre est saisi par l'utilisateur et ne doit pas être interprété comme du HTML.
+                const btn = document.createElement('div');
+                btn.className = `p-3 rounded-lg cursor-pointer flex justify-between items-center ${chat.id === currentChatId ? 'bg-blue-900' : 'bg-gray-700 hover:bg-gray-600'}`;
+
+                const title = document.createElement('span');
+                title.textContent = chat.title;
+                title.addEventListener('click', () => loadChat(chat.id));
+
+                const actions = document.createElement('div');
+                actions.className = 'flex';
+
+                const renameBtn = document.createElement('button');
+                renameBtn.className = 'text-blue-400 mx-1 hover:text-blue-300';
+                renameBtn.title = 'Renommer';
+                renameBtn.textContent = '✎';
+                renameBtn.addEventListener('click', () => renameChat(chat.id));
+
+                const deleteBtn = document.createElement('button');
+                deleteBtn.className = 'text-red-400 ml-1 hover:text-red-300';
+                deleteBtn.textContent = '✕';
+                deleteBtn.addEventListener('click', () => deleteChat(chat.id));
+
+                actions.append(renameBtn, deleteBtn);
+                btn.append(title, actions);
+                historyList.appendChild(btn);
+            });
+        }
+
+        function loadChat(id) {
+            currentChatId = id;
+            const chat = chats.find(c => c.id === id);
+            chatBox.innerHTML = '';
+            
+            if (chat.messages.length === 0) {
+                chatBox.innerHTML = '<div class="text-gray-400 italic">Nouvelle discussion. Posez votre question.</div>';
+            } else {
+                chat.messages.forEach((m, idx) => {
+                    // m.model doit être passé ici
+                    renderMessage(m.role, m.content, m.id, m.model);
+                });
+            }
+            renderHistory();
+        }
+
+        function deleteChat(id) {
+            chats = chats.filter(c => c.id !== id);
+            saveToStorage();
+            if (currentChatId === id) {
+                chatBox.innerHTML = '<div class="text-gray-400 italic">Discussion supprimée.</div>';
+            }
+            renderHistory();
+        }
+
+        function renameChat(id) {
+            const chat = chats.find(c => c.id === id);
+            if (!chat) return;
+            const newName = prompt("Entrez le nouveau nom de la discussion :", chat.title);
+            if (newName && newName.trim() !== "") {
+                chat.title = newName.trim();
+                saveToStorage();
+                renderHistory();
+            }
+        }
+
+        async function sendMessage() {
+            const text = userInput.value;
+            if (!text) return;
+
+            let chat = chats.find(c => c.id === currentChatId);
+            
+            if (!chat) {
+                alert("Une discussion n'est pas sélectionnée. Veuillez créer une nouvelle discussion.");
+                return;
+            }
+
+            // Le paramètre 'model' doit être ajouté ici
+            const userMsg = { role: 'user', content: text, id: 'user-' + Date.now(), model: modelSelect.value || DEFAULT_MODEL };
+            chat.messages.push(userMsg);
+            renderMessage('user', text, userMsg.id, userMsg.model); // Passage du model ici
+            saveToStorage();
+            
+            userInput.value = '';
+
+            // Préparation de la requête : on envoie tout l'historique via /api/chat, en streaming
+            const payload = {
+                model: modelSelect.value || DEFAULT_MODEL,
+                messages: chat.messages.map(m => ({
+                    role: m.role === 'ai' ? 'assistant' : m.role, // Traduction pour les standards souvent utilisés
+                    content: m.content
+                })),
+                stream: true
+            };
+
+            const loadingId = 'loading-' + Date.now();
+            const systemMsg = { role: 'system', content: '...', id: loadingId };
+            chat.messages.push(systemMsg);
+
+            const streamDiv = document.createElement('div');
+            streamDiv.id = loadingId;
+            streamDiv.className = 'ai-message';
+            streamDiv.innerHTML = '<div class="message-content streaming-content">...</div>';
+            chatBox.appendChild(streamDiv);
+            chatBox.scrollTop = chatBox.scrollHeight;
+
+            let fullText = '';
+
+            try {
+                const response = await fetch('/api/chat', { 
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                const contentElem = streamDiv.querySelector('.message-content');
+                let buffer = '';
+
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop(); // garde la dernière ligne (potentiellement incomplète)
+
+                    for (const line of lines) {
+                        if (!line.trim()) continue;
+                        const data = JSON.parse(line);
+                        fullText += data.message?.content || '';
+                        contentElem.textContent = fullText;
+                        chatBox.scrollTop = chatBox.scrollHeight;
+                    }
+                }
+
+                streamDiv.remove();
+                const aiMsg = { role: 'ai', content: fullText };
+                chat.messages.splice(chat.messages.indexOf(systemMsg), 1);
+                chat.messages.push(aiMsg);
+                saveToStorage();
+
+                renderMessage('ai', fullText);
+            } catch (e) {
+                const contentElem = streamDiv.querySelector('.message-content');
+                if (contentElem) contentElem.textContent = "Erreur de connexion au serveur.";
+                chat.messages.splice(chat.messages.indexOf(systemMsg), 1);
+                saveToStorage();
+            }
+        }
+
+        function renderMessage(role, text, id, model) {
+            const messageDiv = document.createElement('div');
+            messageDiv.className = role === 'user' ? 'user-message' : 'ai-message';
+            if (id) messageDiv.id = id;
+
+            let formattedText = text
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/\"/g, "&quot;")
+                .replace(/'/g, "&#39;");
+
+            const codeBlockRegex = /```(\w*)\n([\s\S]*?)\n```/g;
+            const codeBlocks = [];
+
+            formattedText = formattedText.replace(codeBlockRegex, (match, lang, code) => {
+                const cleanLang = lang.trim() ? lang.trim() : 'plaintext';
+                codeBlocks.push(`<pre class="line-numbers"><code class="language-${cleanLang}">${code.trim()}</code></pre>`);
+                return `\u0000${codeBlocks.length - 1}\u0000`;
+            });
+
+            formattedText = formattedText.replace(/(\r?\n|\\n)/g, '<br/>');
+            formattedText = formattedText.replace(/\u0000(\d+)\u0000/g, (match, index) => codeBlocks[Number(index)]);
+
+            messageDiv.innerHTML = `<div class="message-content">${formattedText}</div>`;
+            
+            if (role === 'user' && model) {
+                const modelInfo = document.createElement('div');
+                modelInfo.className = 'model-info';
+                modelInfo.textContent = `(${model})`;
+                messageDiv.appendChild(modelInfo);
+            }
+
+            chatBox.appendChild(messageDiv);
+            
+            setTimeout(() => {
+                if (window.Prism) {
+                    Prism.highlightAll();
+                }
+            }, 100);
+        }
+
+
+        userInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') sendMessage();
+        });
+
+        init();
+    </script>
+</body>
+</html>
